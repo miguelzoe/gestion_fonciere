@@ -19,11 +19,28 @@ def get_shapefile_path():
 
 def convert_to_wgs84(gdf):
     """Convertir en WGS84 (EPSG:4326) de manière sécurisée"""
+    # Vérifier que le GeoDataFrame a une géométrie valide
+    if not isinstance(gdf, gpd.GeoDataFrame):
+        raise ValueError("L'objet fourni n'est pas un GeoDataFrame")
+    
+    # Vérifier que la colonne geometry existe et est définie
+    if gdf.geometry is None or len(gdf) == 0:
+        raise ValueError("Aucune géométrie valide trouvée dans le GeoDataFrame")
+    
+    # Si pas de CRS défini, on essaie de le deviner ou on utilise WGS84 par défaut
     if gdf.crs is None:
-        # Si pas de CRS, assumer qu'il s'agit déjà de WGS84
-        gdf = gdf.set_crs(epsg=4326, allow_override=True)
-    elif gdf.crs.to_epsg() != 4326:
+        # Pour le Cameroun (Yaoundé), essayer d'abord avec WGS84
+        try:
+            gdf = gdf.set_crs(epsg=4326, allow_override=True)
+        except Exception as e:
+            print(f"Erreur lors de l'assignation du CRS: {e}")
+            # Essayer avec un CRS local pour le Cameroun si WGS84 échoue
+            gdf = gdf.set_crs(epsg=32633, allow_override=True)
+    
+    # Convertir vers WGS84 si nécessaire
+    if gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(epsg=4326)
+    
     return gdf
 
 @app.route('/')
@@ -54,34 +71,87 @@ def get_info():
     try:
         gdf = gpd.read_file(get_shapefile_path())
         
+        # Informations de debug
+        debug_info = {
+            "is_geodataframe": isinstance(gdf, gpd.GeoDataFrame),
+            "has_geometry_column": 'geometry' in gdf.columns if hasattr(gdf, 'columns') else False,
+            "geometry_is_none": gdf.geometry is None if hasattr(gdf, 'geometry') else True,
+            "geometry_column_name": gdf.geometry.name if hasattr(gdf, 'geometry') and gdf.geometry is not None else None
+        }
+        
         return jsonify({
             "success": True,
             "data": {
                 "name": SHAPEFILE_NAME,
                 "total_features": len(gdf),
-                "crs": str(gdf.crs),
-                "geometry_type": gdf.geometry.type.unique().tolist(),
+                "crs": str(gdf.crs) if gdf.crs else "No CRS defined",
+                "geometry_type": gdf.geometry.type.unique().tolist() if gdf.geometry is not None else [],
                 "columns": gdf.columns.tolist(),
                 "bounds": {
                     "minx": float(gdf.total_bounds[0]),
                     "miny": float(gdf.total_bounds[1]),
                     "maxx": float(gdf.total_bounds[2]),
                     "maxy": float(gdf.total_bounds[3])
-                }
-            }
+                } if gdf.geometry is not None else None
+            },
+            "debug": debug_info
         })
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        import traceback
+        return jsonify({
+            "success": False, 
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 @app.route('/api/geojson')
 def get_geojson():
     """Récupérer toutes les données en format GeoJSON"""
     try:
+        # Lire le shapefile
         gdf = gpd.read_file(get_shapefile_path())
         
-        # Vérifier que la colonne geometry existe
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
+        # Debug: afficher les informations du GeoDataFrame
+        print(f"Type: {type(gdf)}")
+        print(f"Colonnes: {gdf.columns.tolist()}")
+        print(f"Nombre de lignes: {len(gdf)}")
+        print(f"CRS: {gdf.crs}")
+        print(f"Geometry column name: {gdf.geometry.name if hasattr(gdf, 'geometry') else 'None'}")
+        
+        # Vérifier que c'est bien un GeoDataFrame
+        if not isinstance(gdf, gpd.GeoDataFrame):
+            return jsonify({
+                "success": False, 
+                "error": "Le fichier chargé n'est pas un GeoDataFrame valide",
+                "debug": {
+                    "type": str(type(gdf)),
+                    "columns": gdf.columns.tolist() if hasattr(gdf, 'columns') else []
+                }
+            }), 500
+        
+        # Vérifier que la géométrie existe
+        if gdf.geometry is None or len(gdf) == 0:
+            return jsonify({
+                "success": False, 
+                "error": "Aucune géométrie trouvée dans le fichier",
+                "debug": {
+                    "has_geometry": gdf.geometry is not None,
+                    "length": len(gdf),
+                    "columns": gdf.columns.tolist()
+                }
+            }), 500
+        
+        # Vérifier s'il y a des géométries valides
+        valid_geoms = gdf.geometry.notna().sum()
+        if valid_geoms == 0:
+            return jsonify({
+                "success": False,
+                "error": "Toutes les géométries sont NULL",
+                "debug": {
+                    "total_rows": len(gdf),
+                    "valid_geometries": valid_geoms
+                }
+            }), 500
         
         # Convertir en WGS84
         gdf = convert_to_wgs84(gdf)
@@ -96,7 +166,12 @@ def get_geojson():
             "total_features": len(geojson['features'])
         })
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        import traceback
+        return jsonify({
+            "success": False, 
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 @app.route('/api/features')
 def get_features():
