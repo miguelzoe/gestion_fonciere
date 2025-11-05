@@ -17,38 +17,40 @@ def get_shapefile_path():
     """Retourne le chemin complet du fichier .shp"""
     return os.path.join(SHAPEFILE_DIR, f"{SHAPEFILE_NAME}.shp")
 
+def load_geodataframe():
+    """Charge le shapefile de manière sécurisée"""
+    try:
+        gdf = gpd.read_file(get_shapefile_path())
+        
+        # Filtrer les géométries NULL si elles existent
+        if gdf.geometry.isna().any():
+            gdf = gdf[gdf.geometry.notna()].copy()
+        
+        return gdf
+    except Exception as e:
+        raise Exception(f"Erreur lors du chargement du shapefile: {str(e)}")
+
 def convert_to_wgs84(gdf):
     """Convertir en WGS84 (EPSG:4326) de manière sécurisée"""
-    # Vérifier que le GeoDataFrame a une géométrie valide
-    if not isinstance(gdf, gpd.GeoDataFrame):
-        raise ValueError("L'objet fourni n'est pas un GeoDataFrame")
-    
-    # Vérifier que la colonne geometry existe et est définie
-    if gdf.geometry is None or len(gdf) == 0:
-        raise ValueError("Aucune géométrie valide trouvée dans le GeoDataFrame")
-    
-    # Si pas de CRS défini, on essaie de le deviner ou on utilise WGS84 par défaut
-    if gdf.crs is None:
-        # Pour le Cameroun (Yaoundé), essayer d'abord avec WGS84
-        try:
-            gdf = gdf.set_crs(epsg=4326, allow_override=True)
-        except Exception as e:
-            print(f"Erreur lors de l'assignation du CRS: {e}")
-            # Essayer avec un CRS local pour le Cameroun si WGS84 échoue
-            gdf = gdf.set_crs(epsg=32633, allow_override=True)
-    
-    # Convertir vers WGS84 si nécessaire
-    if gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(epsg=4326)
-    
-    return gdf
+    try:
+        # Créer une copie pour éviter les modifications
+        gdf_copy = gdf.copy()
+        
+        # Convertir vers WGS84 (le CRS est déjà défini dans votre shapefile)
+        if gdf_copy.crs and gdf_copy.crs.to_epsg() != 4326:
+            gdf_copy = gdf_copy.to_crs(epsg=4326)
+        
+        return gdf_copy
+    except Exception as e:
+        raise Exception(f"Erreur lors de la conversion en WGS84: {str(e)}")
 
 @app.route('/')
 def index():
     """Documentation de l'API"""
     return jsonify({
-        "api": "ArcGIS Shapefile API",
+        "api": "ArcGIS Shapefile API - Biyem-Assi",
         "version": "1.0",
+        "shapefile": SHAPEFILE_NAME,
         "endpoints": {
             "/api/info": "Informations sur le shapefile",
             "/api/geojson": "Récupérer toutes les données en GeoJSON",
@@ -69,91 +71,36 @@ def index():
 def get_info():
     """Informations générales sur le shapefile"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Informations de debug
-        debug_info = {
-            "is_geodataframe": isinstance(gdf, gpd.GeoDataFrame),
-            "has_geometry_column": 'geometry' in gdf.columns if hasattr(gdf, 'columns') else False,
-            "geometry_is_none": gdf.geometry is None if hasattr(gdf, 'geometry') else True,
-            "geometry_column_name": gdf.geometry.name if hasattr(gdf, 'geometry') and gdf.geometry is not None else None
-        }
+        gdf = load_geodataframe()
         
         return jsonify({
             "success": True,
             "data": {
                 "name": SHAPEFILE_NAME,
                 "total_features": len(gdf),
-                "crs": str(gdf.crs) if gdf.crs else "No CRS defined",
-                "geometry_type": gdf.geometry.type.unique().tolist() if gdf.geometry is not None else [],
+                "crs": str(gdf.crs),
+                "crs_epsg": gdf.crs.to_epsg() if gdf.crs else None,
+                "geometry_type": gdf.geometry.type.unique().tolist(),
                 "columns": gdf.columns.tolist(),
                 "bounds": {
                     "minx": float(gdf.total_bounds[0]),
                     "miny": float(gdf.total_bounds[1]),
                     "maxx": float(gdf.total_bounds[2]),
                     "maxy": float(gdf.total_bounds[3])
-                } if gdf.geometry is not None else None
-            },
-            "debug": debug_info
+                }
+            }
         })
     except Exception as e:
-        import traceback
         return jsonify({
             "success": False, 
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 @app.route('/api/geojson')
 def get_geojson():
     """Récupérer toutes les données en format GeoJSON"""
     try:
-        # Lire le shapefile
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Debug: afficher les informations du GeoDataFrame
-        print(f"Type: {type(gdf)}")
-        print(f"Colonnes: {gdf.columns.tolist()}")
-        print(f"Nombre de lignes: {len(gdf)}")
-        print(f"CRS: {gdf.crs}")
-        print(f"Geometry column name: {gdf.geometry.name if hasattr(gdf, 'geometry') else 'None'}")
-        
-        # Vérifier que c'est bien un GeoDataFrame
-        if not isinstance(gdf, gpd.GeoDataFrame):
-            return jsonify({
-                "success": False, 
-                "error": "Le fichier chargé n'est pas un GeoDataFrame valide",
-                "debug": {
-                    "type": str(type(gdf)),
-                    "columns": gdf.columns.tolist() if hasattr(gdf, 'columns') else []
-                }
-            }), 500
-        
-        # Vérifier que la géométrie existe
-        if gdf.geometry is None or len(gdf) == 0:
-            return jsonify({
-                "success": False, 
-                "error": "Aucune géométrie trouvée dans le fichier",
-                "debug": {
-                    "has_geometry": gdf.geometry is not None,
-                    "length": len(gdf),
-                    "columns": gdf.columns.tolist()
-                }
-            }), 500
-        
-        # Vérifier s'il y a des géométries valides
-        valid_geoms = gdf.geometry.notna().sum()
-        if valid_geoms == 0:
-            return jsonify({
-                "success": False,
-                "error": "Toutes les géométries sont NULL",
-                "debug": {
-                    "total_rows": len(gdf),
-                    "valid_geometries": valid_geoms
-                }
-            }), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         # Convertir en GeoJSON
@@ -166,11 +113,9 @@ def get_geojson():
             "total_features": len(geojson['features'])
         })
     except Exception as e:
-        import traceback
         return jsonify({
             "success": False, 
-            "error": str(e),
-            "traceback": traceback.format_exc()
+            "error": str(e)
         }), 500
 
 @app.route('/api/features')
@@ -180,13 +125,7 @@ def get_features():
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         # Calculer les indices de pagination
@@ -214,13 +153,7 @@ def get_features():
 def get_sample_features():
     """Récupérer un échantillon de 3 parcelles"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         # Limiter à 3 parcelles maximum
@@ -243,16 +176,11 @@ def get_sample_features():
 def get_feature(feature_id):
     """Récupérer une entité spécifique par ID"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
+        gdf = load_geodataframe()
         
         if feature_id < 0 or feature_id >= len(gdf):
             return jsonify({"success": False, "error": "Feature not found"}), 404
         
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
         gdf = convert_to_wgs84(gdf)
         
         # Extraire l'entité
@@ -270,13 +198,7 @@ def get_feature(feature_id):
 def get_bounds():
     """Récupérer les limites géographiques"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         bounds = gdf.total_bounds
@@ -299,7 +221,7 @@ def get_bounds():
 def get_attributes():
     """Liste des attributs disponibles"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
+        gdf = load_geodataframe()
         
         attributes = {}
         for col in gdf.columns:
@@ -321,13 +243,7 @@ def get_attributes():
 def search_features():
     """Rechercher des entités"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         # Récupérer les paramètres de recherche
@@ -354,40 +270,30 @@ def search_features():
 def get_largest_parcels():
     """Récupérer les 3 plus grandes parcelles par superficie"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
+        gdf = load_geodataframe()
         
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84 pour l'affichage
-        gdf_display = convert_to_wgs84(gdf.copy())
-        
-        # Calculer la superficie en utilisant une projection appropriée (UTM)
-        # Pour le Cameroun (Yaoundé), utiliser UTM zone 33N
-        gdf_utm = gdf.to_crs(epsg=32633) if gdf.crs else gdf.set_crs(epsg=32633, allow_override=True)
-        
-        # Calculer la superficie
-        gdf_utm['area_m2'] = gdf_utm.geometry.area
+        # Calculer la superficie dans le CRS d'origine (UTM) pour avoir des mètres carrés
+        gdf_calc = gdf.copy()
+        gdf_calc['area_m2'] = gdf_calc.geometry.area
         
         # Trier et prendre les 3 plus grandes
-        largest_indices = gdf_utm.nlargest(3, 'area_m2').index
+        largest_indices = gdf_calc.nlargest(3, 'area_m2').index
         
-        # Récupérer les parcelles correspondantes en WGS84
-        largest_parcels = gdf_display.loc[largest_indices].copy()
-        largest_parcels['area_m2'] = gdf_utm.loc[largest_indices, 'area_m2'].values
+        # Convertir en WGS84 pour l'affichage
+        gdf_display = convert_to_wgs84(gdf.loc[largest_indices].copy())
+        gdf_display['area_m2'] = gdf_calc.loc[largest_indices, 'area_m2'].values
         
         # Convertir en GeoJSON
-        geojson = json.loads(largest_parcels.to_json())
+        geojson = json.loads(gdf_display.to_json())
         
         # Préparer les données de réponse
         features_with_area = []
         for i, feature in enumerate(geojson['features']):
-            area_m2 = largest_parcels.iloc[i]['area_m2']
+            area_m2 = gdf_display.iloc[i]['area_m2']
             area_ha = area_m2 / 10000
             
             feature['properties']['area_m2'] = round(float(area_m2), 2)
-            feature['properties']['area_ha'] = round(float(area_ha), 2)
+            feature['properties']['area_ha'] = round(float(area_ha), 4)
             feature['properties']['rank'] = i + 1
             
             features_with_area.append(feature)
@@ -397,12 +303,12 @@ def get_largest_parcels():
             "total_features": len(gdf),
             "largest_parcels": features_with_area,
             "area_summary": {
-                "max_area_m2": round(float(largest_parcels['area_m2'].max()), 2),
-                "max_area_ha": round(float(largest_parcels['area_m2'].max() / 10000), 2),
-                "min_area_m2": round(float(largest_parcels['area_m2'].min()), 2),
-                "min_area_ha": round(float(largest_parcels['area_m2'].min() / 10000), 2),
-                "average_area_m2": round(float(largest_parcels['area_m2'].mean()), 2),
-                "average_area_ha": round(float(largest_parcels['area_m2'].mean() / 10000), 2)
+                "max_area_m2": round(float(gdf_display['area_m2'].max()), 2),
+                "max_area_ha": round(float(gdf_display['area_m2'].max() / 10000), 4),
+                "min_area_m2": round(float(gdf_display['area_m2'].min()), 2),
+                "min_area_ha": round(float(gdf_display['area_m2'].min() / 10000), 4),
+                "average_area_m2": round(float(gdf_display['area_m2'].mean()), 2),
+                "average_area_ha": round(float(gdf_display['area_m2'].mean() / 10000), 4)
             }
         })
     except Exception as e:
@@ -412,32 +318,42 @@ def get_largest_parcels():
 def get_parcelles_with_status():
     """Récupérer les parcelles avec statuts fiscaux simulés"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
+        gdf = load_geodataframe()
         
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
+        # Calculer les superficies dans le CRS d'origine (UTM)
+        superficies = gdf.geometry.area
         
-        # Convertir en WGS84
-        gdf = convert_to_wgs84(gdf)
-        
-        # Calculer les superficies en UTM
-        gdf_utm = gdf.to_crs(epsg=32633)
-        superficies = gdf_utm.geometry.area
+        # Convertir en WGS84 pour les coordonnées
+        gdf_wgs84 = convert_to_wgs84(gdf)
         
         parcelles_with_status = []
         
-        for idx, row in gdf.iterrows():
+        for idx in range(len(gdf)):
+            row = gdf_wgs84.iloc[idx]
+            
+            # Utiliser les vraies données du shapefile
             parcelle_id = idx
-            numero_parcelle = row.get('NUMERO', f'PARC_{idx:04d}') if 'NUMERO' in row else f'PARC_{idx:04d}'
-            proprietaire = row.get('NOM', f'Propriétaire {idx}') if 'NOM' in row else f'Propriétaire {idx}'
-            adresse = row.get('ADRESSE', 'Biyem-Assi, Yaoundé') if 'ADRESSE' in row else 'Biyem-Assi, Yaoundé'
+            numero_parcelle = str(row.get('Numero_de', f'PARC_{idx:04d}'))
+            proprietaire = str(row.get('Noms_Raiso', f'Propriétaire {idx}'))
+            quartier = str(row.get('Quartier', 'Biyem-Assi'))
+            lieu_dit = str(row.get('Lieu_dit', ''))
+            commune = str(row.get('Commune', 'Yaoundé'))
+            
+            adresse = f"{quartier}, {commune}"
+            if lieu_dit and lieu_dit != 'nan':
+                adresse = f"{lieu_dit}, {adresse}"
             
             superficie = round(float(superficies.iloc[idx]), 2)
             
-            prix_m2 = random.uniform(100, 1000)
-            impot_annuel = round(superficie * prix_m2 / 1000) * 1000
+            # Utiliser les montants du shapefile si disponibles
+            montant_annuel_shp = row.get('Montant_an', 0)
+            if montant_annuel_shp and montant_annuel_shp > 0:
+                impot_annuel = int(montant_annuel_shp)
+            else:
+                prix_m2 = random.uniform(100, 1000)
+                impot_annuel = round(superficie * prix_m2 / 1000) * 1000
             
+            # Simuler les statuts de paiement
             rand_val = random.random()
             if rand_val < 0.4:
                 statut = "a_jour"
@@ -457,9 +373,10 @@ def get_parcelles_with_status():
             
             parcelle_data = {
                 "id": str(parcelle_id),
-                "numero": str(numero_parcelle),
-                "proprietaireNom": str(proprietaire),
-                "adresse": str(adresse),
+                "numero": numero_parcelle,
+                "proprietaireNom": proprietaire,
+                "adresse": adresse,
+                "quartier": quartier,
                 "superficie": superficie,
                 "impotAnnuel": int(impot_annuel),
                 "montantDu": int(montant_du),
@@ -499,13 +416,7 @@ def get_parcelles_with_status():
 def export_geojson():
     """Exporter les données en fichier GeoJSON"""
     try:
-        gdf = gpd.read_file(get_shapefile_path())
-        
-        # Vérifier la géométrie
-        if 'geometry' not in gdf.columns or gdf.geometry is None:
-            return jsonify({"success": False, "error": "No geometry column found"}), 500
-        
-        # Convertir en WGS84
+        gdf = load_geodataframe()
         gdf = convert_to_wgs84(gdf)
         
         output_path = f"/tmp/{SHAPEFILE_NAME}.geojson"
@@ -527,37 +438,44 @@ def show_map():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Carte ArcGIS - Biyem-Assi</title>
+        <title>Carte Parcellaire - Biyem-Assi</title>
         <meta charset="utf-8" />
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <style>
-            body { margin: 0; padding: 0; }
+            body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
             #map { width: 100%; height: 100vh; }
-            .info { padding: 10px; background: white; border-radius: 5px; }
+            .info { padding: 10px; background: white; border-radius: 5px; max-width: 300px; }
+            .info h3 { margin: 0 0 10px 0; color: #2c3e50; }
             .legend { 
                 position: absolute; 
                 bottom: 20px; 
                 right: 20px; 
                 background: white; 
-                padding: 10px; 
-                border-radius: 5px;
-                box-shadow: 0 0 10px rgba(0,0,0,0.2);
+                padding: 15px; 
+                border-radius: 8px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             }
+            .legend h4 { margin: 0 0 10px 0; color: #2c3e50; }
+            .legend-item { margin: 5px 0; }
         </style>
     </head>
     <body>
         <div id="map"></div>
         <div class="legend">
-            <h4>Légende - Biyem-Assi</h4>
-            <div><span style="color: #3388ff">■</span> Toutes les parcelles</div>
-            <div><span style="color: #ff0000">■</span> 3 plus grandes parcelles</div>
+            <h4>🗺️ Biyem-Assi</h4>
+            <div class="legend-item"><span style="color: #3388ff">■</span> Parcelles cadastrales</div>
+            <div class="legend-item"><span style="color: #ff0000">■</span> 3 plus grandes parcelles</div>
+            <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                Total: 208 parcelles
+            </div>
         </div>
         <script>
-            var map = L.map('map').setView([3.8480, 11.5021], 13);
+            var map = L.map('map').setView([3.8480, 11.5021], 14);
             
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '© OpenStreetMap contributors'
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
             }).addTo(map);
             
             fetch('/api/geojson')
@@ -566,12 +484,13 @@ def show_map():
                     if (data.success) {
                         var allParcels = L.geoJSON(data.features, {
                             onEachFeature: function(feature, layer) {
-                                var popup = '<div class="info"><h3>Parcelle ' + (feature.properties.NUMERO || feature.properties.numero || 'N/A') + '</h3>';
-                                for (var key in feature.properties) {
-                                    if (key !== 'geometry') {
-                                        popup += '<b>' + key + ':</b> ' + feature.properties[key] + '<br>';
-                                    }
-                                }
+                                var props = feature.properties;
+                                var popup = '<div class="info">';
+                                popup += '<h3>📋 Parcelle</h3>';
+                                popup += '<b>Numéro:</b> ' + (props.Numero_de || 'N/A') + '<br>';
+                                popup += '<b>Propriétaire:</b> ' + (props.Noms_Raiso || 'N/A') + '<br>';
+                                popup += '<b>Quartier:</b> ' + (props.Quartier || 'N/A') + '<br>';
+                                popup += '<b>Superficie:</b> ' + (props.AREA || 'N/A') + ' m²<br>';
                                 popup += '</div>';
                                 layer.bindPopup(popup);
                             },
@@ -586,15 +505,14 @@ def show_map():
                             .then(response => response.json())
                             .then(largestData => {
                                 if (largestData.success) {
-                                    var largestParcels = L.geoJSON(largestData.largest_parcels, {
+                                    L.geoJSON(largestData.largest_parcels, {
                                         onEachFeature: function(feature, layer) {
-                                            var popup = '<div class="info"><h3>Parcelle ' + feature.properties.rank + ' plus grande</h3>';
-                                            popup += '<b>Superficie:</b> ' + feature.properties.area_ha + ' ha (' + feature.properties.area_m2 + ' m²)<br>';
-                                            for (var key in feature.properties) {
-                                                if (key !== 'area_m2' && key !== 'area_ha' && key !== 'rank' && key !== 'geometry') {
-                                                    popup += '<b>' + key + ':</b> ' + feature.properties[key] + '<br>';
-                                                }
-                                            }
+                                            var props = feature.properties;
+                                            var popup = '<div class="info">';
+                                            popup += '<h3>🏆 Parcelle #' + props.rank + '</h3>';
+                                            popup += '<b>Superficie:</b> ' + props.area_ha + ' ha<br>';
+                                            popup += '<b>(' + props.area_m2 + ' m²)</b><br>';
+                                            popup += '<b>Propriétaire:</b> ' + (props.Noms_Raiso || 'N/A') + '<br>';
                                             popup += '</div>';
                                             layer.bindPopup(popup);
                                         },
@@ -602,15 +520,13 @@ def show_map():
                                             color: '#ff0000',
                                             weight: 3,
                                             fillColor: '#ff0000',
-                                            fillOpacity: 0.4
+                                            fillOpacity: 0.3
                                         }
                                     }).addTo(map);
-                                    
-                                    var allBounds = allParcels.getBounds();
-                                    map.fitBounds(allBounds);
                                 }
-                            })
-                            .catch(error => console.error('Erreur:', error));
+                            });
+                        
+                        map.fitBounds(allParcels.getBounds());
                     }
                 })
                 .catch(error => console.error('Erreur:', error));
